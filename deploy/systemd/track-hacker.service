@@ -1,0 +1,18 @@
+[Unit]
+Description=Track Hacker (Express tracker)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/dhiren/Repositories/Track_hacker
+EnvironmentFile=/home/dhiren/Repositories/Track_hacker/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/dhiren/Repositories/Track_hacker/src/index.js
+Restart=always
+RestartSec=3
+User=dhiren
+
+[Install]
+WantedBy=multi-user.target
+
+
